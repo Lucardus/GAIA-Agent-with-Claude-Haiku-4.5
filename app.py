@@ -10,6 +10,13 @@ from smolagents import CodeAgent, ToolCallingAgent, OpenAIServerModel, DuckDuckG
 from dotenv import load_dotenv
 load_dotenv()
 
+import spaces
+
+@spaces.GPU
+def dummy_gpu_function():
+    """Função vazia só para satisfazer o requisito de ZeroGPU do Space."""
+    return None
+
 # (Keep Constants as is)
 # --- Constants ---
 DEFAULT_API_URL = "https://agents-course-unit4-scoring.hf.space"
