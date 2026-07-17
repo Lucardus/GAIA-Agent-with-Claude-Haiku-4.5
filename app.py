@@ -2,7 +2,13 @@ import os
 import gradio as gr
 import requests
 import inspect
+import re
+import time
+import json
 import pandas as pd
+from smolagents import CodeAgent, ToolCallingAgent, OpenAIServerModel, DuckDuckGoSearchTool, tool, LiteLLMModel
+from dotenv import load_dotenv
+load_dotenv()
 
 # (Keep Constants as is)
 # --- Constants ---
@@ -10,14 +16,221 @@ DEFAULT_API_URL = "https://agents-course-unit4-scoring.hf.space"
 
 # --- Basic Agent Definition ---
 # ----- THIS IS WERE YOU CAN BUILD WHAT YOU WANT ------
+
+model = OpenAIServerModel(
+    model_id="llama-3.3-70b-versatile",
+    api_base="https://api.groq.com/openai/v1",
+    api_key=os.environ["GROQ_API_KEY"],
+    temperature=0.1
+)
+ 
+search_tool = DuckDuckGoSearchTool()
+ 
+@tool
+def baixar_arquivo(task_id: str) -> str:
+    """Baixa o arquivo anexo da pergunta usando o Task ID fornecido pela plataforma.
+    Use SEMPRE que a pergunta mencionar arquivos locais, anexos, planilhas (.csv, .xlsx) ou áudios (.mp3).
+ 
+    Args:
+        task_id: O ID da tarefa atual (ex: 'task_0', 'task_1').
+    """
+    url = f"{DEFAULT_API_URL}/api/tasks/{task_id}/file"
+    try:
+        resp = requests.get(url, timeout=15)
+        resp.raise_for_status()
+ 
+        cd = resp.headers.get("content-disposition")
+        if cd and "filename=" in cd:
+            match = re.search(r'filename\*?=(?:UTF-8\'\')?"?([^";]+)"?', cd)
+            nome_arquivo = match.group(1) if match else f"arquivo_{task_id}.tmp"
+        else:
+            nome_arquivo = f"arquivo_{task_id}.tmp"
+ 
+        with open(nome_arquivo, "wb") as f:
+            f.write(resp.content)
+        return nome_arquivo
+    except Exception as e:
+        return f"Erro ao baixar o arquivo: {e}"
+ 
+ 
+@tool
+def visitar_pagina(url: str) -> str:
+    """Visita uma página web e retorna seu conteúdo em texto, truncado para economizar tokens.
+ 
+    Args:
+        url: o endereço da página a ser visitada.
+    """
+    import requests
+    from markdownify import markdownify
+    try:
+        resp = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+        resp.raise_for_status()
+        texto = markdownify(resp.text)
+        # Reduzido de 3000 -> 1200 chars para economizar tokens por step
+        return texto[:1200]
+    except Exception as e:
+        return f"Erro ao acessar a página: {e}"
+ 
+ 
+@tool
+def data_atual() -> str:
+    """Retorna a data e hora atual."""
+    from datetime import datetime
+    return datetime.now().isoformat()
+ 
+ 
+@tool
+def transcrever_audio(caminho: str) -> str:
+    """Transcreve um arquivo de áudio (mp3/wav) para texto.
+ 
+    Args:
+        caminho: caminho local do arquivo de áudio.
+    """
+    from groq import Groq
+    client = Groq(api_key=os.environ["GROQ_API_KEY"])
+    try:
+        with open(caminho, "rb") as f:
+            transcricao = client.audio.transcriptions.create(
+                file=f, model="whisper-large-v3"
+            )
+        return transcricao.text
+    except Exception as e:
+        return f"Erro ao transcrever o áudio: {e}"
+ 
+ 
+@tool
+def buscar_e_resumir(query: str) -> str:
+    """Busca na web e retorna um resumo curto do resultado mais relevante.
+ 
+    Args:
+        query: termo de busca.
+    """
+    resultado = search_tool(query)
+    # Reduzido de 2000 -> 1200 chars para economizar tokens por step
+    return str(resultado)[:1200]
+ 
+ 
+@tool
+def ler_planilha(caminho: str) -> str:
+    """Lê um arquivo CSV ou Excel e retorna um resumo em texto.
+ 
+    Args:
+        caminho: caminho local do arquivo baixado.
+    """
+    try:
+        if caminho.endswith(".csv"):
+            df = pd.read_csv(caminho)
+        else:
+            df = pd.read_excel(caminho)
+    except Exception as e:
+        return f"Erro ao ler o arquivo: {e}"
+    return df.to_string()
+ 
+ 
+def montar_prompt(pergunta: str, task_id: str) -> str:
+    contexto_task = f"Você está resolvendo a tarefa com Task ID: '{task_id}'.\n" if task_id else ""
+    return f"""{contexto_task}Pergunta original do usuário: {pergunta}
+ 
+    REGRAS DE FORMATO DE RESPOSTA (GAIA):
+    - Números: escreva apenas o número (sem separador de milhar, sem $ ou % salvo se pedido).
+    - Strings: não use artigos (a, o, um) nem abreviações, escreva por extenso os números dentro da string.
+    - Listas: separe por vírgula, sem "e" antes do último item.
+    - Ao final, chame a tool final_answer(resposta) com APENAS o valor cru, sem frases.
+ 
+    EXEMPLO DE CÓDIGO VÁLIDO:
+    ```python
+    resultado_busca = buscar_e_resumir("Mercedes Sosa discography")
+    if resultado_busca:
+        print(resultado_busca)
+    else:
+        print("Nenhum resultado encontrado")
+    ```
+ 
+Resolva o problema passo a passo usando código Python válido."""
+ 
+ 
+agent = CodeAgent(
+    model=model,
+    # Removido search_tool da lista (redundante com buscar_e_resumir, que já trunca)
+    tools=[visitar_pagina, ler_planilha, data_atual, buscar_e_resumir, transcrever_audio, baixar_arquivo],
+    add_base_tools=True,
+    max_steps=10,  # Reduzido de 12 -> 10 para economizar tokens, ainda com folga suficiente
+    additional_authorized_imports=[
+        "pandas",
+        "numpy",
+        "requests",
+        "bs4",
+        "math",
+        "datetime",
+        "re",
+        "json"
+    ]
+)
+ 
+ 
+def responder(pergunta: str, task_id: str = None) -> str:
+    if not task_id:
+        match = re.search(r'([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})', pergunta)
+        if match:
+            task_id = match.group(1)
+        else:
+            match_simples = re.search(r'(task_\d+)', pergunta)
+            if match_simples:
+                task_id = match_simples.group(1)
+ 
+    prompt = montar_prompt(pergunta, task_id)
+ 
+    max_tentativas = 3
+    for tentativa in range(max_tentativas):
+        try:
+            resultado = agent.run(prompt)
+            return str(resultado).strip()
+        except Exception as e:
+            erro_str = str(e).lower()
+            # Backoff mais generoso especificamente para rate limit (429)
+            if "rate limit" in erro_str or "429" in erro_str:
+                espera = 20 * (tentativa + 1)  # 20s, 40s, 60s
+                print(f"Rate limit atingido, esperando {espera}s...")
+                time.sleep(espera)
+            elif tentativa < max_tentativas - 1:
+                print(f"Tentativa {tentativa + 1} falhou: {e}")
+                time.sleep(5)
+            else:
+                print(f"Erro ao processar pergunta após {max_tentativas} tentativas: {e}")
+                return "Não foi possível determinar a resposta"
+    return "Não foi possível determinar a resposta"
+ 
+ 
+def rodar_todas_perguntas(perguntas: list) -> list:
+    """Roda o agente em uma lista de perguntas, salvando incrementalmente
+    em resultados_parciais.json a cada resposta (evita perder progresso
+    se o script travar no meio do batch).
+ 
+    Args:
+        perguntas: lista de dicts com 'question' e opcionalmente 'task_id'.
+    """
+    resultados = []
+    for i, q in enumerate(perguntas):
+        print(f"Processando pergunta {i + 1}/{len(perguntas)}...")
+        resp = responder(q["question"], q.get("task_id"))
+        resultados.append({"task_id": q.get("task_id"), "answer": resp})
+ 
+        with open("resultados_parciais.json", "w", encoding="utf-8") as f:
+            json.dump(resultados, f, ensure_ascii=False, indent=2)
+ 
+        # Respiro entre perguntas para não estourar TPM/RPM do Groq
+        time.sleep(3)
+ 
+    return resultados
+
 class BasicAgent:
     def __init__(self):
-        print("BasicAgent initialized.")
+        print("Agent initialized com Groq + smolagents.")
     def __call__(self, question: str) -> str:
         print(f"Agent received question (first 50 chars): {question[:50]}...")
-        fixed_answer = "This is a default answer."
-        print(f"Agent returning fixed answer: {fixed_answer}")
-        return fixed_answer
+        answer = responder(question)
+        print(f"Agent returning answer: {answer[:100]}...")
+        return answer
 
 def run_and_submit_all( profile: gr.OAuthProfile | None):
     """
