@@ -25,7 +25,7 @@ DEFAULT_API_URL = "https://agents-course-unit4-scoring.hf.space"
 # ----- THIS IS WERE YOU CAN BUILD WHAT YOU WANT ------
 
 model = OpenAIServerModel(
-    model_id="llama-3.3-70b-versatile",
+    model_id="openai/gpt-oss-120b",
     api_base="https://api.groq.com/openai/v1",
     api_key=os.environ["GROQ_API_KEY"],
     temperature=0.1
@@ -158,7 +158,6 @@ Resolva o problema passo a passo usando código Python válido."""
  
 agent = CodeAgent(
     model=model,
-    # Removido search_tool da lista (redundante com buscar_e_resumir, que já trunca)
     tools=[visitar_pagina, ler_planilha, data_atual, buscar_e_resumir, transcrever_audio, baixar_arquivo],
     add_base_tools=True,
     max_steps=10,  # Reduzido de 12 -> 10 para economizar tokens, ainda com folga suficiente
