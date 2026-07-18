@@ -25,7 +25,7 @@ DEFAULT_API_URL = "https://agents-course-unit4-scoring.hf.space"
 # ----- THIS IS WERE YOU CAN BUILD WHAT YOU WANT ------
 
 model = OpenAIServerModel(
-    model_id="llama-3.3-70b-versatile",
+    model_id="lllama-3.1-8b-instant",
     api_base="https://api.groq.com/openai/v1",
     api_key=os.environ["GROQ_API_KEY"],
     temperature=0.1,
