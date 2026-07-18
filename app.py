@@ -25,10 +25,11 @@ DEFAULT_API_URL = "https://agents-course-unit4-scoring.hf.space"
 # ----- THIS IS WERE YOU CAN BUILD WHAT YOU WANT ------
 
 model = OpenAIServerModel(
-    model_id="openai/gpt-oss-120b",
+    model_id="llama-3.3-70b-versatile",
     api_base="https://api.groq.com/openai/v1",
     api_key=os.environ["GROQ_API_KEY"],
-    temperature=0.1
+    temperature=0.1,
+    max_completion_tokens = 1000
 )
  
 search_tool = DuckDuckGoSearchTool()
@@ -132,6 +133,7 @@ def ler_planilha(caminho: str) -> str:
     except Exception as e:
         return f"Erro ao ler o arquivo: {e}"
     return df.to_string()
+    
  
  
 def montar_prompt(pergunta: str, task_id: str) -> str:
