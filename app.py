@@ -38,39 +38,39 @@ class LiteLLMModelComCache(LiteLLMModel):
     def generate(self, messages, *args, **kwargs):
         if messages:
             first_msg = messages[0]
-            
-            # Detecta de forma segura a role se for dicionário ou objeto
+ 
             role = None
             if isinstance(first_msg, dict):
                 role = first_msg.get("role")
             elif hasattr(first_msg, "role"):
                 role = getattr(first_msg, "role")
-
+ 
             if role == "system":
                 conteudo = None
                 if isinstance(first_msg, dict):
                     conteudo = first_msg.get("content")
                 elif hasattr(first_msg, "content"):
                     conteudo = getattr(first_msg, "content")
-
+ 
                 if isinstance(conteudo, str):
                     conteudo = [{"type": "text", "text": conteudo}]
-                
+ 
                 if isinstance(conteudo, list) and conteudo:
                     conteudo[-1] = {**conteudo[-1], "cache_control": {"type": "ephemeral"}}
-                    
+ 
                     if isinstance(first_msg, dict):
                         messages[0]["content"] = conteudo
                     elif hasattr(first_msg, "content"):
                         setattr(messages[0], "content", conteudo)
-                        
+ 
         return super().generate(messages, *args, **kwargs)
-
+ 
+ 
 model = LiteLLMModelComCache(
     model_id="anthropic/claude-haiku-4-5-20251001",
     api_key=os.environ["ANTHROPIC_API_KEY"],
     temperature=0.1,
-    max_tokens=8000
+    max_tokens=8000,
 )
  
 search_tool = DuckDuckGoSearchTool()
@@ -84,7 +84,6 @@ def baixar_arquivo(task_id: str) -> str:
     Args:
         task_id: O ID da tarefa atual (ex: 'task_0', 'task_1').
     """
-    # Endpoint correto da API do curso: GET /files/{task_id}
     url = f"{DEFAULT_API_URL}/files/{task_id}"
     try:
         resp = requests.get(url, timeout=15)
@@ -228,6 +227,7 @@ def ler_planilha(caminho: str) -> str:
  
     return "\n\n".join(partes)
  
+ 
 @tool
 def ler_pdf(caminho: str) -> str:
     """Extrai o texto de um arquivo PDF.
@@ -321,6 +321,12 @@ def montar_prompt(pergunta: str, task_id: str) -> str:
 Resolva o problema passo a passo usando código Python válido."""
  
  
+INSTRUCOES_CUSTOM = """You are an elite data analyst and problem solver competing in the GAIA benchmark.
+Execute local code and read local files properly using the provided tools, outputting exact strings or values.
+Never search the web for files that can be downloaded locally using `baixar_arquivo`.
+When dealing with lists of names or structured data, write code to double check your logic and avoid assumption errors.
+Deliver the final answer strictly in the format requested."""
+ 
 agent = CodeAgent(
     model=model,
     tools=[
@@ -334,7 +340,8 @@ agent = CodeAgent(
         baixar_arquivo,
     ],
     add_base_tools=True,
-    max_steps=12, 
+    max_steps=15,
+    instructions=INSTRUCOES_CUSTOM,
     additional_authorized_imports=[
         "pandas",
         "numpy",
@@ -382,8 +389,7 @@ def responder(pergunta: str, task_id: str = None) -> str:
  
 def rodar_todas_perguntas(perguntas: list) -> list:
     """Roda o agente em uma lista de perguntas, salvando incrementalmente
-    em resultados_parciais.json a cada resposta (evita perder progresso
-    se o script travar no meio do batch).
+    em resultados_parciais.json a cada resposta. Útil pra teste local fora do Gradio.
  
     Args:
         perguntas: lista de dicts com 'question' e opcionalmente 'task_id'.
@@ -403,64 +409,62 @@ def rodar_todas_perguntas(perguntas: list) -> list:
 
 class BasicAgent:
     def __init__(self):
-        print("Agent initialized com Groq + smolagents.")
-    def __call__(self, question: str) -> str:
+        print("Agent initialized com Claude Haiku 4.5 + smolagents.")
+ 
+    def __call__(self, question: str, task_id: str = None) -> str:
         print(f"Agent received question (first 50 chars): {question[:50]}...")
-        answer = responder(question)
+        answer = responder(question, task_id)
         print(f"Agent returning answer: {answer[:100]}...")
         return answer
-
-def run_and_submit_all( profile: gr.OAuthProfile | None):
+ 
+ 
+def run_and_submit_all(profile: gr.OAuthProfile | None):
     """
     Fetches all questions, runs the BasicAgent on them, submits all answers,
     and displays the results.
     """
-    # --- Determine HF Space Runtime URL and Repo URL ---
-    space_id = os.getenv("SPACE_ID") # Get the SPACE_ID for sending link to the code
-
+    space_id = os.getenv("SPACE_ID")
+ 
     if profile:
-        username= f"{profile.username}"
+        username = f"{profile.username}"
         print(f"User logged in: {username}")
     else:
         print("User not logged in.")
         return "Please Login to Hugging Face with the button.", None
-
+ 
     api_url = DEFAULT_API_URL
     questions_url = f"{api_url}/questions"
     submit_url = f"{api_url}/submit"
-
-    # 1. Instantiate Agent ( modify this part to create your agent)
+ 
     try:
-        agent = BasicAgent()
+        agent_instance = BasicAgent()
     except Exception as e:
         print(f"Error instantiating agent: {e}")
         return f"Error initializing agent: {e}", None
-    # In the case of an app running as a hugging Face space, this link points toward your codebase ( usefull for others so please keep it public)
+ 
     agent_code = f"https://huggingface.co/spaces/{space_id}/tree/main"
     print(agent_code)
-
-    # 2. Fetch Questions
+ 
     print(f"Fetching questions from: {questions_url}")
     try:
         response = requests.get(questions_url, timeout=15)
         response.raise_for_status()
         questions_data = response.json()
         if not questions_data:
-             print("Fetched questions list is empty.")
-             return "Fetched questions list is empty or invalid format.", None
+            print("Fetched questions list is empty.")
+            return "Fetched questions list is empty or invalid format.", None
         print(f"Fetched {len(questions_data)} questions.")
     except requests.exceptions.RequestException as e:
         print(f"Error fetching questions: {e}")
         return f"Error fetching questions: {e}", None
     except requests.exceptions.JSONDecodeError as e:
-         print(f"Error decoding JSON response from questions endpoint: {e}")
-         print(f"Response text: {response.text[:500]}")
-         return f"Error decoding server response for questions: {e}", None
+        print(f"Error decoding JSON response from questions endpoint: {e}")
+        print(f"Response text: {response.text[:500]}")
+        return f"Error decoding server response for questions: {e}", None
     except Exception as e:
         print(f"An unexpected error occurred fetching questions: {e}")
         return f"An unexpected error occurred fetching questions: {e}", None
-
-    # 3. Run your Agent
+ 
     results_log = []
     answers_payload = []
     print(f"Running agent on {len(questions_data)} questions...")
@@ -471,23 +475,24 @@ def run_and_submit_all( profile: gr.OAuthProfile | None):
             print(f"Skipping item with missing task_id or question: {item}")
             continue
         try:
-            submitted_answer = agent(question_text)
+            submitted_answer = agent_instance(question_text, task_id)
             answers_payload.append({"task_id": task_id, "submitted_answer": submitted_answer})
             results_log.append({"Task ID": task_id, "Question": question_text, "Submitted Answer": submitted_answer})
         except Exception as e:
-             print(f"Error running agent on task {task_id}: {e}")
-             results_log.append({"Task ID": task_id, "Question": question_text, "Submitted Answer": f"AGENT ERROR: {e}"})
-
+            print(f"Error running agent on task {task_id}: {e}")
+            results_log.append({"Task ID": task_id, "Question": question_text, "Submitted Answer": f"AGENT ERROR: {e}"})
+ 
+        with open("resultados_parciais.json", "w", encoding="utf-8") as f:
+            json.dump(results_log, f, ensure_ascii=False, indent=2)
+ 
     if not answers_payload:
         print("Agent did not produce any answers to submit.")
         return "Agent did not produce any answers to submit.", pd.DataFrame(results_log)
-
-    # 4. Prepare Submission 
+ 
     submission_data = {"username": username.strip(), "agent_code": agent_code, "answers": answers_payload}
     status_update = f"Agent finished. Submitting {len(answers_payload)} answers for user '{username}'..."
     print(status_update)
-
-    # 5. Submit
+ 
     print(f"Submitting {len(answers_payload)} answers to: {submit_url}")
     try:
         response = requests.post(submit_url, json=submission_data, timeout=60)
@@ -529,59 +534,55 @@ def run_and_submit_all( profile: gr.OAuthProfile | None):
         print(status_message)
         results_df = pd.DataFrame(results_log)
         return status_message, results_df
-
-
-# --- Build Gradio Interface using Blocks ---
+ 
 with gr.Blocks() as demo:
     gr.Markdown("# Basic Agent Evaluation Runner")
     gr.Markdown(
         """
         **Instructions:**
-
+ 
         1.  Please clone this space, then modify the code to define your agent's logic, the tools, the necessary packages, etc ...
         2.  Log in to your Hugging Face account using the button below. This uses your HF username for submission.
         3.  Click 'Run Evaluation & Submit All Answers' to fetch questions, run your agent, submit answers, and see the score.
-
+ 
         ---
         **Disclaimers:**
         Once clicking on the "submit button, it can take quite some time ( this is the time for the agent to go through all the questions).
         This space provides a basic setup and is intentionally sub-optimal to encourage you to develop your own, more robust solution. For instance for the delay process of the submit button, a solution could be to cache the answers and submit in a seperate action or even to answer the questions in async.
         """
     )
-
+ 
     gr.LoginButton()
-
+ 
     run_button = gr.Button("Run Evaluation & Submit All Answers")
-
+ 
     status_output = gr.Textbox(label="Run Status / Submission Result", lines=5, interactive=False)
-    # Removed max_rows=10 from DataFrame constructor
     results_table = gr.DataFrame(label="Questions and Agent Answers", wrap=True)
-
+ 
     run_button.click(
         fn=run_and_submit_all,
         outputs=[status_output, results_table]
     )
-
+ 
 if __name__ == "__main__":
-    print("\n" + "-"*30 + " App Starting " + "-"*30)
-    # Check for SPACE_HOST and SPACE_ID at startup for information
+    print("\n" + "-" * 30 + " App Starting " + "-" * 30)
     space_host_startup = os.getenv("SPACE_HOST")
-    space_id_startup = os.getenv("SPACE_ID") # Get SPACE_ID at startup
-
+    space_id_startup = os.getenv("SPACE_ID")
+ 
     if space_host_startup:
         print(f"✅ SPACE_HOST found: {space_host_startup}")
         print(f"   Runtime URL should be: https://{space_host_startup}.hf.space")
     else:
         print("ℹ️  SPACE_HOST environment variable not found (running locally?).")
-
-    if space_id_startup: # Print repo URLs if SPACE_ID is found
+ 
+    if space_id_startup:
         print(f"✅ SPACE_ID found: {space_id_startup}")
         print(f"   Repo URL: https://huggingface.co/spaces/{space_id_startup}")
         print(f"   Repo Tree URL: https://huggingface.co/spaces/{space_id_startup}/tree/main")
     else:
         print("ℹ️  SPACE_ID environment variable not found (running locally?). Repo URL cannot be determined.")
-
-    print("-"*(60 + len(" App Starting ")) + "\n")
-
+ 
+    print("-" * (60 + len(" App Starting ")) + "\n")
+ 
     print("Launching Gradio Interface for Basic Agent Evaluation...")
     demo.launch(ssr_mode=False, server_name="0.0.0.0", server_port=7860)
