@@ -49,6 +49,7 @@ model = LiteLLMModelComCache(
     model_id="anthropic/claude-haiku-4-5-20251001",
     api_key=os.environ["ANTHROPIC_API_KEY"],
     temperature=0.1,
+    max_tokens=8000
 )
  
 search_tool = DuckDuckGoSearchTool()
@@ -189,18 +190,22 @@ def ler_planilha(caminho: str) -> str:
         f"Tipos:\n{df.dtypes.to_string()}",
     ]
  
-    if df.shape[0] <= 200:
+    if df.shape[0] <= 50:
         partes.append(f"Dados completos:\n{df.to_string()}")
     else:
-        partes.append(f"Primeiras linhas:\n{df.head(20).to_string()}")
-        partes.append(f"Últimas linhas:\n{df.tail(10).to_string()}")
+        partes.append(f"Primeiras linhas (Head):\n{df.head(5).to_string()}")
+        partes.append(f"Últimas linhas (Tail):\n{df.tail(5).to_string()}")
         try:
             partes.append(f"Estatísticas numéricas:\n{df.describe().to_string()}")
         except Exception:
             pass
+        partes.append(
+            "Planilha grande: use pandas no seu código pra filtrar/inspecionar "
+            "linhas específicas em vez de depender só deste resumo (ex.: "
+            "print(df[df['coluna'] == 'valor']))."
+        )
  
     return "\n\n".join(partes)
- 
  
 @tool
 def ler_pdf(caminho: str) -> str:
