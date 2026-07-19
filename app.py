@@ -284,7 +284,7 @@ def ler_imagem(caminho: str, pergunta: str = "Descreva esta imagem em detalhes, 
                     {"type": "text", "text": pergunta},
                     {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}},
                 ],
-            }],
+            }], 
         )
         return resposta.choices[0].message.content
     except Exception as e:
