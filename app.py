@@ -36,13 +36,34 @@ class LiteLLMModelComCache(LiteLLMModel):
     """
  
     def generate(self, messages, *args, **kwargs):
-        if messages and messages[0].get("role") == "system":
-            conteudo = messages[0]["content"]
-            if isinstance(conteudo, str):
-                conteudo = [{"type": "text", "text": conteudo}]
-            if isinstance(conteudo, list) and conteudo:
-                conteudo[-1] = {**conteudo[-1], "cache_control": {"type": "ephemeral"}}
-                messages[0]["content"] = conteudo
+        if messages:
+            first_msg = messages[0]
+            
+            # Detecta de forma segura a role se for dicionário ou objeto
+            role = None
+            if isinstance(first_msg, dict):
+                role = first_msg.get("role")
+            elif hasattr(first_msg, "role"):
+                role = getattr(first_msg, "role")
+
+            if role == "system":
+                conteudo = None
+                if isinstance(first_msg, dict):
+                    conteudo = first_msg.get("content")
+                elif hasattr(first_msg, "content"):
+                    conteudo = getattr(first_msg, "content")
+
+                if isinstance(conteudo, str):
+                    conteudo = [{"type": "text", "text": conteudo}]
+                
+                if isinstance(conteudo, list) and conteudo:
+                    conteudo[-1] = {**conteudo[-1], "cache_control": {"type": "ephemeral"}}
+                    
+                    if isinstance(first_msg, dict):
+                        messages[0]["content"] = conteudo
+                    elif hasattr(first_msg, "content"):
+                        setattr(messages[0], "content", conteudo)
+                        
         return super().generate(messages, *args, **kwargs)
 
 model = LiteLLMModelComCache(
@@ -313,7 +334,7 @@ agent = CodeAgent(
         baixar_arquivo,
     ],
     add_base_tools=True,
-    max_steps=16, 
+    max_steps=12, 
     additional_authorized_imports=[
         "pandas",
         "numpy",
