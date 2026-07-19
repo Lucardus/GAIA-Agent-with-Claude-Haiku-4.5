@@ -8,3 +8,7 @@ markdownify
 openai
 ddgs
 spaces
+pypdf
+litellm 
+groq 
+python-dotenv

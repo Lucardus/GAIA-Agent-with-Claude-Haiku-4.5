@@ -24,25 +24,46 @@ DEFAULT_API_URL = "https://agents-course-unit4-scoring.hf.space"
 # --- Basic Agent Definition ---
 # ----- THIS IS WERE YOU CAN BUILD WHAT YOU WANT ------
 
-model = OpenAIServerModel(
-    model_id="llama-3.1-8b-instant",
-    api_base="https://api.groq.com/openai/v1",
-    api_key=os.environ["GROQ_API_KEY"],
+class LiteLLMModelComCache(LiteLLMModel):
+    """LiteLLMModel com prompt caching da Anthropic ativado.
+ 
+    Marca a mensagem de sistema (system prompt + tool defs, que o CodeAgent
+    reenvia inteiros a cada step) com cache_control. Na 1a chamada esse
+    prefixo é escrito no cache (custa um pouco mais); nas chamadas seguintes
+    dentro do TTL, ele é lido do cache a ~10% do preço de input. Só tem
+    efeito com modelos anthropic/*; para outros provedores o campo é
+    ignorado silenciosamente pelo litellm.
+    """
+ 
+    def generate(self, messages, *args, **kwargs):
+        if messages and messages[0].get("role") == "system":
+            conteudo = messages[0]["content"]
+            if isinstance(conteudo, str):
+                conteudo = [{"type": "text", "text": conteudo}]
+            if isinstance(conteudo, list) and conteudo:
+                conteudo[-1] = {**conteudo[-1], "cache_control": {"type": "ephemeral"}}
+                messages[0]["content"] = conteudo
+        return super().generate(messages, *args, **kwargs)
+
+model = LiteLLMModelComCache(
+    model_id="anthropic/claude-haiku-4-5-20251001",
+    api_key=os.environ["ANTHROPIC_API_KEY"],
     temperature=0.1,
-    max_completion_tokens = 1000
 )
  
 search_tool = DuckDuckGoSearchTool()
- 
+
 @tool
 def baixar_arquivo(task_id: str) -> str:
     """Baixa o arquivo anexo da pergunta usando o Task ID fornecido pela plataforma.
-    Use SEMPRE que a pergunta mencionar arquivos locais, anexos, planilhas (.csv, .xlsx) ou áudios (.mp3).
+    Use SEMPRE que a pergunta mencionar arquivos locais, anexos, planilhas (.csv, .xlsx),
+    PDFs, imagens ou áudios (.mp3).
  
     Args:
         task_id: O ID da tarefa atual (ex: 'task_0', 'task_1').
     """
-    url = f"{DEFAULT_API_URL}/api/tasks/{task_id}/file"
+    # Endpoint correto da API do curso: GET /files/{task_id}
+    url = f"{DEFAULT_API_URL}/files/{task_id}"
     try:
         resp = requests.get(url, timeout=15)
         resp.raise_for_status()
@@ -63,19 +84,21 @@ def baixar_arquivo(task_id: str) -> str:
  
 @tool
 def visitar_pagina(url: str) -> str:
-    """Visita uma página web e retorna seu conteúdo em texto, truncado para economizar tokens.
+    """Visita uma página web e retorna seu conteúdo em texto.
  
     Args:
         url: o endereço da página a ser visitada.
     """
-    import requests
     from markdownify import markdownify
+ 
     try:
         resp = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
         resp.raise_for_status()
         texto = markdownify(resp.text)
-        # Reduzido de 3000 -> 1200 chars para economizar tokens por step
-        return texto[:1200]
+        limite = 6000
+        if len(texto) > limite:
+            return texto[:limite] + "\n\n[...conteúdo truncado...]"
+        return texto
     except Exception as e:
         return f"Erro ao acessar a página: {e}"
  
@@ -108,19 +131,46 @@ def transcrever_audio(caminho: str) -> str:
  
 @tool
 def buscar_e_resumir(query: str) -> str:
-    """Busca na web e retorna um resumo curto do resultado mais relevante.
+    """Busca na web e retorna um resumo do resultado mais relevante.
+    Usa Tavily se houver TAVILY_API_KEY configurada; caso contrário cai
+    para DuckDuckGo.
  
     Args:
         query: termo de busca.
     """
+    tavily_key = os.environ.get("TAVILY_API_KEY")
+    if tavily_key:
+        try:
+            resp = requests.post(
+                "https://api.tavily.com/search",
+                json={
+                    "api_key": tavily_key,
+                    "query": query,
+                    "max_results": 5,
+                    "include_answer": True,
+                },
+                timeout=15,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            partes = []
+            if data.get("answer"):
+                partes.append(f"Resposta resumida: {data['answer']}")
+            for r in data.get("results", [])[:5]:
+                partes.append(f"- {r.get('title')}: {r.get('content', '')[:500]} ({r.get('url')})")
+            texto = "\n".join(partes)
+            if texto:
+                return texto[:4000]
+        except Exception:
+            pass
+ 
     resultado = search_tool(query)
-    # Reduzido de 2000 -> 1200 chars para economizar tokens por step
-    return str(resultado)[:1200]
+    return str(resultado)[:4000]
  
  
 @tool
 def ler_planilha(caminho: str) -> str:
-    """Lê um arquivo CSV ou Excel e retorna um resumo em texto.
+    """Lê um arquivo CSV ou Excel e retorna um resumo estruturado.
  
     Args:
         caminho: caminho local do arquivo baixado.
@@ -132,37 +182,133 @@ def ler_planilha(caminho: str) -> str:
             df = pd.read_excel(caminho)
     except Exception as e:
         return f"Erro ao ler o arquivo: {e}"
-    return df.to_string()
-    
+ 
+    partes = [
+        f"Formato: {df.shape[0]} linhas x {df.shape[1]} colunas",
+        f"Colunas: {list(df.columns)}",
+        f"Tipos:\n{df.dtypes.to_string()}",
+    ]
+ 
+    if df.shape[0] <= 200:
+        partes.append(f"Dados completos:\n{df.to_string()}")
+    else:
+        partes.append(f"Primeiras linhas:\n{df.head(20).to_string()}")
+        partes.append(f"Últimas linhas:\n{df.tail(10).to_string()}")
+        try:
+            partes.append(f"Estatísticas numéricas:\n{df.describe().to_string()}")
+        except Exception:
+            pass
+ 
+    return "\n\n".join(partes)
+ 
+ 
+@tool
+def ler_pdf(caminho: str) -> str:
+    """Extrai o texto de um arquivo PDF.
+ 
+    Args:
+        caminho: caminho local do arquivo PDF baixado.
+    """
+    try:
+        from pypdf import PdfReader
+    except ImportError:
+        return "Erro: biblioteca pypdf não instalada."
+ 
+    try:
+        reader = PdfReader(caminho)
+        textos = []
+        for i, page in enumerate(reader.pages):
+            texto_pagina = page.extract_text() or ""
+            textos.append(f"--- Página {i + 1} ---\n{texto_pagina}")
+        texto_final = "\n".join(textos)
+        if len(texto_final) > 6000:
+            return texto_final[:6000] + "\n\n[...PDF truncado...]"
+        return texto_final if texto_final.strip() else "PDF sem texto extraível (pode ser escaneado/imagem)."
+    except Exception as e:
+        return f"Erro ao ler o PDF: {e}"
+ 
+ 
+@tool
+def ler_imagem(caminho: str, pergunta: str = "Descreva esta imagem em detalhes, incluindo qualquer texto visível.") -> str:
+    """Analisa uma imagem (gráfico, captura de tela, foto, tabela escaneada etc.)
+    usando um modelo com visão e retorna a descrição/texto extraído.
+ 
+    Args:
+        caminho: caminho local da imagem baixada.
+        pergunta: o que perguntar sobre a imagem.
+    """
+    import base64
+    import litellm
+ 
+    try:
+        with open(caminho, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode("utf-8")
+ 
+        ext = caminho.split(".")[-1].lower()
+        mime = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png",
+                "gif": "image/gif", "webp": "image/webp"}.get(ext, "image/png")
+ 
+        resposta = litellm.completion(
+            model="anthropic/claude-haiku-4-5-20251001",
+            api_key=os.environ["ANTHROPIC_API_KEY"],
+            max_tokens=1000,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": pergunta},
+                    {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}},
+                ],
+            }],
+        )
+        return resposta.choices[0].message.content
+    except Exception as e:
+        return f"Erro ao analisar a imagem: {e}"
+ 
+ 
+def validar_formato_resposta(resposta: str) -> str:
+    """Limpa a resposta final para bater com as regras de formato do GAIA."""
+    r = resposta.strip().strip('"\'` ')
+    r = re.sub(r'^(a resposta é|resposta|answer|final answer)[:\s]*', '', r, flags=re.IGNORECASE)
+    if r.endswith(".") and not re.match(r'.*\d\.$', r):
+        r = r[:-1]
+    return r.strip()
  
  
 def montar_prompt(pergunta: str, task_id: str) -> str:
     contexto_task = f"Você está resolvendo a tarefa com Task ID: '{task_id}'.\n" if task_id else ""
     return f"""{contexto_task}Pergunta original do usuário: {pergunta}
  
-    REGRAS DE FORMATO DE RESPOSTA (GAIA):
-    - Números: escreva apenas o número (sem separador de milhar, sem $ ou % salvo se pedido).
-    - Strings: não use artigos (a, o, um) nem abreviações, escreva por extenso os números dentro da string.
+    REGRAS DE FORMATO DE RESPOSTA (GAIA) — siga EXATAMENTE, pois a avaliação é por correspondência exata:
+    - Números: escreva apenas o número (sem separador de milhar, sem $ ou % salvo se pedido, sem texto ao redor).
+    - Strings: não use artigos (a, o, um) nem abreviações; escreva por extenso os números dentro da string.
     - Listas: separe por vírgula, sem "e" antes do último item.
+    - NUNCA inclua frases como "a resposta é" ou explicações no valor final.
     - Ao final, chame a tool final_answer(resposta) com APENAS o valor cru, sem frases.
  
-    EXEMPLO DE CÓDIGO VÁLIDO:
-    ```python
-    resultado_busca = buscar_e_resumir("Mercedes Sosa discography")
-    if resultado_busca:
-        print(resultado_busca)
-    else:
-        print("Nenhum resultado encontrado")
-    ```
+    FERRAMENTAS DISPONÍVEIS PARA ARQUIVOS:
+    - baixar_arquivo: baixa o anexo da tarefa (se houver).
+    - ler_planilha: para .csv/.xlsx
+    - ler_pdf: para .pdf
+    - ler_imagem: para .png/.jpg/.jpeg/.gif/.webp
+    - transcrever_audio: para .mp3/.wav
  
 Resolva o problema passo a passo usando código Python válido."""
  
  
 agent = CodeAgent(
     model=model,
-    tools=[visitar_pagina, ler_planilha, data_atual, buscar_e_resumir, transcrever_audio, baixar_arquivo],
+    tools=[
+        visitar_pagina,
+        ler_planilha,
+        ler_pdf,
+        ler_imagem,
+        data_atual,
+        buscar_e_resumir,
+        transcrever_audio,
+        baixar_arquivo,
+    ],
     add_base_tools=True,
-    max_steps=10,  # Reduzido de 12 -> 10 para economizar tokens, ainda com folga suficiente
+    max_steps=16, 
     additional_authorized_imports=[
         "pandas",
         "numpy",
@@ -171,8 +317,8 @@ agent = CodeAgent(
         "math",
         "datetime",
         "re",
-        "json"
-    ]
+        "json",
+    ],
 )
  
  
@@ -192,10 +338,9 @@ def responder(pergunta: str, task_id: str = None) -> str:
     for tentativa in range(max_tentativas):
         try:
             resultado = agent.run(prompt)
-            return str(resultado).strip()
+            return validar_formato_resposta(str(resultado))
         except Exception as e:
             erro_str = str(e).lower()
-            # Backoff mais generoso especificamente para rate limit (429)
             if "rate limit" in erro_str or "429" in erro_str:
                 espera = 20 * (tentativa + 1)  # 20s, 40s, 60s
                 print(f"Rate limit atingido, esperando {espera}s...")
@@ -226,8 +371,7 @@ def rodar_todas_perguntas(perguntas: list) -> list:
         with open("resultados_parciais.json", "w", encoding="utf-8") as f:
             json.dump(resultados, f, ensure_ascii=False, indent=2)
  
-        # Respiro entre perguntas para não estourar TPM/RPM do Groq
-        time.sleep(3)
+        time.sleep(2)
  
     return resultados
 
